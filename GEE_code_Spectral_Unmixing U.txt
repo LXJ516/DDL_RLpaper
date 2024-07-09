@@ -1,0 +1,168 @@
+// Define bounds for the contiguous US as a polygon
+var usPolygon = ee.Geometry.Polygon([
+    [-124.848974, 24.396308], [-66.93457, 24.396308],
+    [-66.93457, 49.384358], [-124.848974, 49.384358],
+    [-124.848974, 24.396308]
+]);
+
+Map.centerObject(usPolygon, 4); // Center the map on the US with a reasonable zoom level
+//Pixel based cloud removal LS5 and LS8 are the same
+function maskLandsat8Clouds(image) {
+    // Select the QA_PIXEL band
+    var qa = image.select('QA_PIXEL');
+
+    // Bitmask for clouds and cloud shadows
+    var cloudShadowBitMask = (1 << 4); // Bit 4 is cloud shadow
+    var cloudsBitMask = (1 << 3); // Bit 3 is cloud
+
+    // Both flags should be set to zero, indicating clear conditions
+    var mask = qa.bitwiseAnd(cloudShadowBitMask).eq(0)
+        .and(qa.bitwiseAnd(cloudsBitMask).eq(0));
+
+    // Apply the mask to the image and return it
+    return image.updateMask(mask);
+}
+
+// Apply the cloud mask to the collection.
+
+// Filter the image collection to the defined polygon and date range
+var imageCollection = ee.ImageCollection("LANDSAT/LC08/C02/T1_TOA")
+    .filterBounds(usPolygon)
+    .filterDate('2020-06-01', '2020-09-01').map(maskLandsat8Clouds); // Apply the cloud mask function
+//Here is 
+// Create a composite image from the least cloudy images
+var composite = imageCollection.median();
+// Display the composite image to ensure most of pixels in the research areas are remained after removing the cloud 
+//B3,B2,B1 for LS5
+Map.addLayer(composite, {
+    bands: ['B4', 'B3', 'B2'],
+    min: 0.0,
+    max: 0.4
+}, 'composite false color');
+
+// Define polygons for bare, water, and vegetation areas//Should be: Stable in atmospheric conditions, homogeneous in landscape and large in size  
+var bare = ee.Geometry.Polygon([
+    [[-119.29158963591193, 47.204453926034134],
+     [-119.29192222982978, 47.20372502078616],
+     [-119.29054893881415, 47.20345532330602],
+     [-119.29017342955207, 47.20414049800489]]
+]);
+var water = ee.Geometry.Polygon([
+    [[-119.42904610218152, 47.22253398528318],
+     [-119.42973274768933, 47.22020224831784],
+     [-119.43299431385144, 47.21390604625894],
+     [-119.42904610218152, 47.21326472446865],
+     [-119.4271149116908, 47.21868656429651],
+     [-119.42608494342907, 47.2217470355224]]
+]);
+var veg = ee.Geometry.Polygon([
+    [[-119.13546041722502, 47.04929418944858],
+     [-119.13752035374846, 47.04929418944858],
+     [-119.13966612096037, 47.04765665820436],
+     [-119.13777784581389, 47.04408900535686]]
+]);
+//The S matrix is composed by the three pure spectral
+var lcfeatures = ee.FeatureCollection([
+    ee.Feature(bare, {label: 'bare'}),
+    ee.Feature(water, {label: 'water'}),
+    ee.Feature(veg, {label: 'vegetation'})
+]);
+
+// Spectral unmixing on the composite image
+//Define the spectral bands used for unmixing
+//B1,B2,B3,B4,B5,B7 for LS5 
+var unmixImage = composite.select(['B2', 'B3', 'B4', 'B5', 'B6', 'B7']);
+//Picking the training matrix's spectral features, and spatial resolution 
+var bareMean = unmixImage.reduceRegion(ee.Reducer.mean(), bare, 30).values();
+var waterMean = unmixImage.reduceRegion(ee.Reducer.mean(), water, 30).values();
+var vegMean = unmixImage.reduceRegion(ee.Reducer.mean(), veg, 30).values();
+var endmembers = ee.Array.cat([bareMean, waterMean, vegMean], 1);
+
+// Apply spectral unmixing function, ensure the three landcovers' proportions are above 0 and sum to one. 
+var unmixedImage = unmixImage.unmix([bareMean, vegMean, waterMean], true, true);
+
+// Display the unmixed image
+Map.addLayer(unmixedImage, {}, 'Unmixed');
+
+// Add labeled layers for visualization
+Map.addLayer(bare, {color: 'FF0000'}, 'Bare Area');
+Map.addLayer(water, {color: '0000FF'}, 'Water Area');
+Map.addLayer(veg, {color: '00FF00'}, 'Vegetation Area');
+//Select the vegetation bands
+var vegBand = unmixedImage.select('band_1');
+
+// Load the redlining polygons (as 8878 samples higher than 5000, load in two batches)
+var rlHalf1 = ee.FeatureCollection("users/lixijing165/RLHalf1");
+var rlHalf2 = ee.FeatureCollection("users/lixijing165/RLHalf2");
+
+// Function to calculate the sum of the 'veg' band for a given feature collection. It should be noticed that here is the proportion. When mutating into the area, it should multiply 100
+function sumVeg(collection) {
+    var sum = collection.map(function(feature) {
+        return feature.set(vegBand.reduceRegion({
+            reducer: ee.Reducer.sum(),
+            geometry: feature.geometry(),
+            scale: 30, // Choose an appropriate scale for your data
+            maxPixels: 1e14
+        }));
+    });
+    return sum;
+}
+
+// Calculate the veg band sum for each polygon in both collections
+var vegSumHalf1 = sumVeg(rlHalf1);
+var vegSumHalf2 = sumVeg(rlHalf2);
+
+// Merge the results into a single feature collection
+var combinedResults = vegSumHalf1.merge(vegSumHalf2);
+
+// Export the results as a CSV: Sum of vegetation areas by polygon 
+Export.table.toDrive({
+    collection: combinedResults,
+    description: 'VegSumResults2020',
+    folder: "VegetationRL",
+    fileFormat: 'CSV',
+    selectors: ['band_1','neighborho','holc_id','holc_grade','city'] // Export fields
+});
+print(vegBand);
+//Next section is binary images generation for landscape metrics calculation
+
+// Access the 'veg' band from the unmixed image
+var vegBand = unmixedImage.select('band_1');
+
+// Apply a threshold to the 'veg' band to create a binary image (here 0.3 is a parameter which can be adjusted)
+var vegBinary = vegBand.gt(0.3).rename('vegBinary');
+
+// Display the binary image
+Map.addLayer(vegBinary, {min: 0, max: 1, palette: ['white', 'green']}, 'Veg > 0.3 as 1');
+
+// Calculate and print the number of pixels with vegBinary equal to 1 within combinedResults for sensitive test
+var vegBinaryCount = combinedResults.aggregate_sum('vegBinary');
+print('Number of vegBinary pixels equal to 1:', vegBinaryCount);
+
+//Next section: Ensure GEE will export all values into one image to drive, the size of the image could by reduced by clipping. Here the code uses polygons to clip the binary images and the output binary image only keeps values within polygons. 
+
+
+// Combine the geometries from the combinedResults feature collection
+var combinedGeometry = combinedResults.geometry();
+
+// Clip the vegBinary image using the combined geometries
+var clippedVegBinary = vegBinary.clip(combinedGeometry);
+
+// Export the clipped vegBinary image to Google Drive
+Export.image.toDrive({
+    image: clippedVegBinary,
+    description: 'VegBinaryImageCT2020_Clipped',
+    scale: 30,
+    region: usPolygon,
+    fileFormat: 'GeoTIFF',
+    maxPixels: 1e13
+});
+
+// Calculate and print the number of pixels with vegBinary equal to 1 within combinedResults
+var vegBinaryCount = combinedResults.aggregate_sum('vegBinary');
+print('Number of vegBinary pixels equal to 1:', vegBinaryCount);
+//Using Charlotte downtown to check the spectral unmixing results. 
+var charlotteCity = ee.Geometry.Point([-80.8431, 35.2271]);
+
+// Zoom to the Charlotte City area
+Map.centerObject(charlotteCity, 10);
