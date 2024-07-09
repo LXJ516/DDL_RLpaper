@@ -1,0 +1,125 @@
+---
+title: "Untitled"
+output: html_document
+date: "2024-07-09"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r City_Test}
+####This section is used to test the landscape metrics calculation by one city. Before calculate each RL parcel's landscape metrics, to ensure the landscape metrics is calculated by city parcel, the input image should be binary, and all listed landscape metric indicators can be successfully calculated for most case
+####Packages are needed
+library(raster)
+library(sf)
+library(landscapemetrics)
+library(tidyverse)
+####One city's binary image 
+Akron<-raster("C:\\Users\\xijingl2\\Downloads\\Raster2\\Akron.tif")
+####Load the RL parcels in the shapefile format and pick the corresponding city's all RL parcels
+rl_holc<-st_read("C:\\Users\\xijingl2\\OneDrive - University of North Carolina at Chapel Hill\\Final\\fullshpfile\\shapefile\\holc_ad_data.shp")
+Arkon_sf<-rl_holc%>%
+  dplyr::filter(city=="Akron")
+####Transform the coordinate system to ensure the two datasets are the same.
+Akron_transformed <- st_transform(Arkon_sf, crs(Akron))
+Akron_transformed$ID <- seq_len(nrow(Akron_transformed))
+######If using landcover images like ESA 11-type image or 17-type NLCD image, a reclassification on raster values is needed herein. For instance here illustrates the reclassification to identify the vegetation by NLCD data. In this case, as the output of GEE is binary, we don't need this step. 
+
+
+# Akron <- raster("path_to_your_raster_file")
+
+# Reclassification rules 
+# 格式为 matrix(c(from1, to1, newvalue1, from2, to2, newvalue2, ...), ncol=3, byrow=TRUE)
+###reclassMatrix <- matrix(c(40, 95, 1,   # 
+###                          -Inf, 40, 0, # 
+###                          95, Inf, 0), # 
+####                        ncol=3, byrow=TRUE)
+
+#Reclassify by reclassify function in raster package
+#Akron_reclassified <- reclassify(Akron, reclassMatrix)
+Akron_reclassified <- Akron
+# plot the reclassified image (in this case binary image) to check 
+plot(Akron_reclassified)
+####Define the landscape metric indicators in this case, here is a list. We only need to calcualte the vegetation class namely value==1 case . Here the function is "sample_lsm" indicating that the lsm is calculated by polygons in the spatial data 
+metrics <- sample_lsm(Akron_reclassified, what = c("lsm_c_pd","lsm_c_area_mn","lsm_c_shape_mn",
+    "lsm_c_ai","lsm_c_ca","lsm_c_cai_mn", "lsm_c_te","lsm_c_area_sd",
+                                                        "lsm_c_contig_mn","lsm_c_ed","lsm_c_frac_mn",
+                                                        "lsm_c_pd","lsm_c_shape_mn"), y=Akron_transformed)%>%
+  dplyr::filter(class==1)
+
+```
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r allRL_parcels}
+###Define the folder saved all city images 
+raster_folder <- "D:/Raster2019"
+###Define the path for RL data 
+shapefile_path <- "C:/Users/lixij/OneDrive - University of North Carolina at Chapel Hill/Final/fullshpfile/shapefile/holc_ad_data.shp"
+#####Only keep Grade A-D parcels 
+rl_holc <- st_read(shapefile_path) %>%
+  filter(holc_grade != "E")
+###Define the file list of city images 
+
+raster_files <- list.files(raster_folder, pattern = "\\.tif$", full.names = TRUE)
+
+####Initiate a data frame to save LM results
+
+all_metrics <- data.frame()
+####Initiate a (spatial) data frame to save the shaplefiles for results joining
+
+all_shapefiles <- data.frame() 
+####A loop applying all cities' images 
+
+for (raster_file in raster_files) {
+    city_name <- tools::file_path_sans_ext(basename(raster_file))
+    raster_data <- raster(raster_file)
+    city_sf <- rl_holc %>% filter(city == city_name)
+
+    if (nrow(city_sf) == 0) next
+    if (st_crs(city_sf) != crs(raster_data)) {
+        city_sf_transformed <- st_transform(city_sf, crs(raster_data))
+    } else {
+        city_sf_transformed <- city_sf
+    }
+
+    city_sf_transformed$ID <- seq_len(nrow(city_sf_transformed))
+
+    raster_reclassified <- raster_data
+
+    metrics <- sample_lsm(raster_reclassified, what = c("lsm_c_pd","lsm_c_area_mn","lsm_c_shape_mn",
+"lsm_c_ai","lsm_c_ca","lsm_c_cai_mn", "lsm_c_te","lsm_c_area_sd","lsm_c_para_sd",
+                                                    "lsm_c_contig_mn","lsm_c_ed","lsm_c_frac_mn"), y=city_sf_transformed) %>%
+      filter(class == 1)
+    metrics$city <- city_name
+    all_metrics <- rbind(all_metrics, metrics)
+
+    # Save the results in one data frame
+    city_df <- st_drop_geometry(city_sf_transformed)
+    all_shapefiles <- rbind(all_shapefiles, city_df)
+}
+
+write.csv(all_metrics, file.path(raster_folder, "2019VEffRaw.csv"), row.names = FALSE)
+#####The original landscape calculation results are in a long version data frame, here spread it into a wide version. The parameters of the columns can be adjusted by landscape metrics list.
+LM2019_wideU <- spread(all_metrics, key = metric, value = value)[,c(5,7:9,11:19)]
+####Life join the results with redlining parcel variables for further ananlysis. This datasets only keeps parcels successfully calculate at least 1 landscape metrics 
+results<-left_join(all_shapefiles,LM2019_wideU,by=c("city"="city","ID"="plot_id"))%>%
+  select(-area_descr,-name,-NEAR_DIST,-NEAR_FID)
+#####Finally join with the original whole RL shapefile dataset
+LM19<-left_join(rl_holc,results,by=c("city"="city","holc_id"="holc_id","holc_grade"="holc_grade","neighborho"="neighborho","state"="state"))%>%
+  select(-area_descr,-name,-NEAR_DIST,-NEAR_FID)
+####Export the result
+write.csv(aaa19ve, file.path(raster_folder, "2019VEct30LM.csv"), row.names = FALSE)
+
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
