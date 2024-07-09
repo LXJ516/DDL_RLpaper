@@ -1,0 +1,28 @@
+import arcpy
+import os
+
+#Define the working space
+arcpy.env.workspace = "path_to_your_workspace"  #Activate and Define the working space 
+arcpy.env.overwriteOutput = True
+
+#Define the place import and export the rasters 
+input_raster = "C:\\Users\\xijingl2\\Downloads\\New folder\\Veg2020.tif"  #Binary vegetation image in the whole US 
+input_shapefile = "C:/Users/xijingl2/OneDrive - University of North Carolina at Chapel Hill/Final/City_RL.shp"  # Import city level RL shapefile to clip the image 
+
+# Export 196 binary vegetation image into the folder
+output_folder = "C:\\Users\\xijingl2\\Downloads\\Raster2"
+
+# Check the existance of the export folder 
+if not os.path.exists(output_folder):
+    os.makedirs(output_folder)
+
+# Go through the shapefile's polygons 
+with arcpy.da.SearchCursor(input_shapefile, ["SHAPE@", "city"]) as cursor:
+    for row in cursor:
+        # Define the export image's name by the city name in the RLshapefile 
+        output_raster = os.path.join(output_folder, f"{row[1]}.tif")  #Export city level images as GEOTIFF
+
+        # Extract by mask tool to clip 
+        arcpy.sa.ExtractByMask(input_raster, row[0]).save(output_raster)
+
+        print(f"Raster saved: {output_raster}")
